@@ -1,0 +1,267 @@
+# =============================================================================
+# Deploy wiki-mcp — Build & Push to ECR (Development)
+# =============================================================================
+#
+# CI/CD pipeline for the FastMCP knowledge-base server that lives in this repo.
+#
+# What it does:
+#   1. Builds the wiki-mcp Docker image (Python 3.13 multi-stage)
+#   2. Pushes to the ECR repository created by the CDK SharedVpcStack
+#   3. Forces an ArgoCD sync so the new image rolls out immediately
+#
+# ArgoCD Image Updater (newest-build strategy) polls ECR for new tags and
+# writes the image reference back to the cdk-monitoring git repo. ArgoCD
+# then syncs from git. The force-sync step is a best-effort accelerator —
+# Image Updater will converge on its own if the step fails.
+#
+# ECR repo (created by CDK SharedVpcStack, createWikiMcpEcrRepository=true):
+#   wiki-mcp → SSM: /shared/ecr-wiki-mcp/{env}/repository-uri
+#
+# Image tag format: {git-sha}-r{run_attempt}
+#   Example: a3f8bc1d2e4f6a8b0c2d4e6f8a0b2c4d6e8f0a2b-r1
+#   The SHA traces directly back to the commit in THIS repo (my-mcp).
+#
+# Prerequisites (one-time setup, not managed by this pipeline):
+#   kubectl create namespace wiki-mcp
+#   kubectl create configmap wiki-mcp-config \
+#     --from-literal=WIKI_S3_BUCKET=bedrock-dev-kb-data -n wiki-mcp
+#   kubectl create secret generic wiki-mcp-basicauth \
+#     --from-file=users=<(htpasswd -nb mcp <password>) -n wiki-mcp
+#   aws ssm put-parameter --name /wiki-mcp/basicauth-header \
+#     --value "Basic $(echo -n 'mcp:<password>' | base64)" --type SecureString
+#
+# Trigger methods:
+#   1. Push to main or develop when Python source, requirements, or Dockerfile changes
+#   2. Manual: workflow_dispatch (deploy any commit on demand)
+#
+# Pipeline:
+#   build-wiki-mcp → push-wiki-mcp
+# =============================================================================
+
+name: "Deploy wiki-mcp"
+
+on:
+  push:
+    branches:
+      - main
+      - develop
+    paths:
+      - "*.py"
+      - "requirements.txt"
+      - "Dockerfile"
+
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  ENVIRONMENT: development
+  AWS_REGION: "eu-west-1"
+  # Composite tag: SHA from this repo (my-mcp) + run attempt.
+  # Prevents ECR overwrites on pipeline retries; traces back to Python commit.
+  IMAGE_TAG: "${{ github.sha }}-r${{ github.run_attempt }}"
+
+# ===========================================================================
+# Concurrency: cancel in-progress run when a new push arrives.
+# ===========================================================================
+concurrency:
+  group: deploy-wiki-mcp-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ===========================================================================
+  # Job 1: Build wiki-mcp Docker image
+  #
+  # No AWS credentials needed at build time — image is exported to a local tar
+  # then shared with the push job via actions/cache.
+  # ===========================================================================
+  build-wiki-mcp:
+    name: "[wiki-mcp] Build Docker Image"
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker Image (wiki-mcp)
+        uses: docker/build-push-action@v6
+        with:
+          # Build context is the repo root — Dockerfile copies kb.py and server.py
+          # from the working directory.
+          context: .
+          file: Dockerfile
+          push: false
+          load: false
+          tags: wiki-mcp:${{ env.IMAGE_TAG }}
+          # GHA layer cache — speeds up pip install on unchanged requirements.txt
+          cache-from: type=gha,scope=wiki-mcp
+          cache-to: type=gha,mode=max,scope=wiki-mcp
+          provenance: false
+          outputs: type=docker,dest=/tmp/wiki-mcp-image.tar
+
+      - name: Cache wiki-mcp Image
+        uses: actions/cache/save@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: /tmp/wiki-mcp-image.tar
+          key: wiki-mcp-image-${{ env.ENVIRONMENT }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Build Summary
+        run: |
+          IMAGE_SIZE=$(du -sh /tmp/wiki-mcp-image.tar | cut -f1)
+          echo "## [wiki-mcp] Docker Build" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag**: ${{ env.IMAGE_TAG }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Size**: ${IMAGE_SIZE}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Dockerfile**: Dockerfile (repo root)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+
+  # ===========================================================================
+  # Job 2: Push wiki-mcp image to ECR
+  #
+  # Requires AWS OIDC credentials to:
+  #   - Read ECR URL from SSM (/shared/ecr-wiki-mcp/{env}/repository-uri)
+  #   - Authenticate to ECR and push the image
+  #   - Trigger an immediate ArgoCD sync via SSM send-command
+  # ===========================================================================
+  push-wiki-mcp:
+    name: "[wiki-mcp] Push to ECR"
+    needs: [build-wiki-mcp]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: ${{ vars.ENVIRONMENT || 'development' }}
+
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Configure AWS Credentials
+        uses: ./.github/actions/configure-aws
+        with:
+          role-to-assume: ${{ secrets.AWS_OIDC_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Restore wiki-mcp Image from Cache
+        uses: actions/cache/restore@cdf6c1fa76f9f475f3d7449005a359c84ca0f306 # v5.0.3
+        with:
+          path: /tmp/wiki-mcp-image.tar
+          key: wiki-mcp-image-${{ env.ENVIRONMENT }}-${{ github.run_id }}-${{ github.run_attempt }}
+          fail-on-cache-miss: true
+
+      - name: Load Docker Image
+        run: |
+          docker load -i /tmp/wiki-mcp-image.tar
+          echo "[PASS] wiki-mcp image loaded"
+
+      - name: Resolve ECR URL (wiki-mcp)
+        id: resolve-ecr
+        run: |
+          # SSM path published by CDK SharedVpcStack (createWikiMcpEcrRepository=true):
+          #   /shared/ecr-wiki-mcp/{env}/repository-uri
+          ECR_URL=$(aws ssm get-parameter \
+            --name "/shared/ecr-wiki-mcp/${{ env.ENVIRONMENT }}/repository-uri" \
+            --query 'Parameter.Value' \
+            --output text)
+
+          if [ -z "$ECR_URL" ] || [ "$ECR_URL" = "None" ]; then
+            echo "::error::wiki-mcp ECR URL not found at /shared/ecr-wiki-mcp/${{ env.ENVIRONMENT }}/repository-uri"
+            echo "::error::Ensure the CDK Shared-Infra stack has been deployed with createWikiMcpEcrRepository=true"
+            exit 1
+          fi
+
+          echo "::add-mask::$ECR_URL"
+          echo "ecr-url=$ECR_URL" >> $GITHUB_OUTPUT
+
+      - name: Push wiki-mcp Image to ECR
+        run: |
+          ECR_URL="${{ steps.resolve-ecr.outputs.ecr-url }}"
+          TAG="${{ env.IMAGE_TAG }}"
+
+          aws ecr get-login-password --region "${{ env.AWS_REGION }}" \
+            | docker login --username AWS --password-stdin "$ECR_URL"
+
+          docker tag "wiki-mcp:${TAG}" "${ECR_URL}:${TAG}"
+          docker push "${ECR_URL}:${TAG}"
+
+          echo "[PASS] wiki-mcp image pushed: ${ECR_URL}:${TAG}"
+
+      - name: Push Summary
+        run: |
+          echo "## [wiki-mcp] ECR Push" >> $GITHUB_STEP_SUMMARY
+          echo "- **Tag**: ${{ env.IMAGE_TAG }} ✅" >> $GITHUB_STEP_SUMMARY
+
+      # -----------------------------------------------------------------------
+      # Force ArgoCD sync via SSM send-command (best-effort accelerator).
+      #
+      # ArgoCD Image Updater (newest-build strategy) will poll ECR and write
+      # the new tag back to the cdk-monitoring git repo automatically. This
+      # step triggers an immediate sync so the pod rolls out without waiting
+      # for the Image Updater poll interval (~2 min).
+      #
+      # Soft failure: if the control-plane is unreachable the step exits 0.
+      # -----------------------------------------------------------------------
+      - name: Force ArgoCD Sync via SSM
+        env:
+          REGION: ${{ env.AWS_REGION }}
+        run: |
+          INSTANCE_ID=$(aws ec2 describe-instances \
+            --filters \
+              "Name=tag:k8s:bootstrap-role,Values=control-plane" \
+              "Name=instance-state-name,Values=running" \
+            --query "Reservations[0].Instances[0].InstanceId" \
+            --region "$REGION" --output text 2>/dev/null || echo "")
+
+          if [ -z "$INSTANCE_ID" ] || [ "$INSTANCE_ID" = "None" ]; then
+            echo "::warning::Could not resolve control-plane instance — skipping force-sync"
+            echo "ArgoCD Image Updater will deploy the new image within its poll interval."
+            exit 0
+          fi
+
+          echo "::add-mask::$INSTANCE_ID"
+
+          CMD_ID=$(aws ssm send-command \
+            --instance-ids "$INSTANCE_ID" \
+            --document-name "AWS-RunShellScript" \
+            --parameters 'commands=["sudo kubectl -n argocd exec deploy/argocd-server -- argocd app sync wiki-mcp --force 2>&1 || echo [WARN] force-sync skipped — Image Updater will converge automatically"]' \
+            --region "$REGION" \
+            --query "Command.CommandId" --output text)
+
+          echo "SSM force-sync command: $CMD_ID"
+
+          for i in $(seq 1 15); do
+            sleep 5
+            STATUS=$(aws ssm get-command-invocation \
+              --command-id "$CMD_ID" \
+              --instance-id "$INSTANCE_ID" \
+              --region "$REGION" \
+              --query "Status" --output text 2>/dev/null || echo "Pending")
+            echo "  [$i] SSM status: $STATUS"
+            if [[ "$STATUS" == "Success" || "$STATUS" == "Failed" || "$STATUS" == "TimedOut" ]]; then
+              break
+            fi
+          done
+
+          OUTPUT=$(aws ssm get-command-invocation \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE_ID" \
+            --region "$REGION" \
+            --query "StandardOutputContent" --output text 2>/dev/null || echo "(no output)")
+          echo "--- Remote output ---"
+          echo "$OUTPUT"
+
+      - name: Deploy Summary
+        run: |
+          echo "## [wiki-mcp] Kubernetes Deployment" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image tag**: \`${{ env.IMAGE_TAG }}\` ✅" >> $GITHUB_STEP_SUMMARY
+          echo "- **ECR SSM path**: \`/shared/ecr-wiki-mcp/${{ env.ENVIRONMENT }}/repository-uri\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "ArgoCD Image Updater (newest-build strategy) will detect the new tag" >> $GITHUB_STEP_SUMMARY
+          echo "and rolling-update the wiki-mcp Deployment on the general node pool." >> $GITHUB_STEP_SUMMARY
