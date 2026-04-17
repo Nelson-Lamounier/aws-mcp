@@ -169,8 +169,8 @@ server.addTool({
   parameters: z.object({}),
   execute: async () => {
     return await kb.getPagesCombined([
-      'resume/hard-rules',
-      'resume/gap-boundaries',
+      'resume/agent-guide',
+      'resume/gap-awareness',
       'resume/voice-library',
     ]);
   },
@@ -206,8 +206,8 @@ app.get('/healthz', async (c) => {
  */
 app.get('/api/constraints', async (c) => {
   const content = await kb.getPagesCombined([
-    'resume/hard-rules',
-    'resume/gap-boundaries',
+    'resume/agent-guide',
+    'resume/gap-awareness',
     'resume/voice-library',
   ]);
   return c.json({ content });
@@ -225,7 +225,7 @@ app.get('/api/achievements', async (c) => {
  * GET /api/career — returns the career-narrative wiki page.
  */
 app.get('/api/career', async (c) => {
-  const content = await kb.getPage('resume/career-narrative');
+  const content = await kb.getPage('resume/career-history');
   return c.json({ content });
 });
 
