@@ -38,7 +38,7 @@
 #   build-wiki-mcp → push-wiki-mcp
 # =============================================================================
 
-name: "Deploy wiki-mcp"
+name: 'Deploy wiki-mcp'
 
 on:
   push:
@@ -46,11 +46,11 @@ on:
       - main
       - develop
     paths:
-      - "src/**/*.ts"
-      - "package.json"
-      - "yarn.lock"
-      - "tsconfig.json"
-      - "Dockerfile"
+      - 'src/**/*.ts'
+      - 'package.json'
+      - 'yarn.lock'
+      - 'tsconfig.json'
+      - 'Dockerfile'
 
   workflow_dispatch:
 
@@ -60,10 +60,10 @@ permissions:
 
 env:
   ENVIRONMENT: development
-  AWS_REGION: "eu-west-1"
+  AWS_REGION: 'eu-west-1'
   # Composite tag: SHA from this repo (my-mcp) + run attempt.
   # Prevents ECR overwrites on pipeline retries; traces back to the commit.
-  IMAGE_TAG: "${{ github.sha }}-r${{ github.run_attempt }}"
+  IMAGE_TAG: '${{ github.sha }}-r${{ github.run_attempt }}'
 
 # ===========================================================================
 # Concurrency: cancel in-progress run when a new push arrives.
@@ -80,7 +80,7 @@ jobs:
   # then shared with the push job via actions/cache.
   # ===========================================================================
   build-wiki-mcp:
-    name: "[wiki-mcp] Build Docker Image"
+    name: '[wiki-mcp] Build Docker Image'
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -131,7 +131,7 @@ jobs:
   #   - Trigger an immediate ArgoCD sync via SSM send-command
   # ===========================================================================
   push-wiki-mcp:
-    name: "[wiki-mcp] Push to ECR"
+    name: '[wiki-mcp] Push to ECR'
     needs: [build-wiki-mcp]
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -144,14 +144,6 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-
-      - name: Trigger update in portfolio-doc
-        uses: peter-evans/repository-dispatch@v3
-        with:
-          token: ${{ secrets.DOCS_PAT }}
-          repository: Nelson-Lamounier/portfolio-doc
-          event-type: wiki-updated
-          client-payload: '{"sha": "${{ github.sha }}"}'
 
       - name: Configure AWS Credentials
         uses: ./.github/actions/configure-aws
