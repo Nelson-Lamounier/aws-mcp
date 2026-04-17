@@ -284,6 +284,6 @@ if (MCP_MODE === 'stdio') {
   console.info(`[wiki-mcp] Starting httpStream on port ${PORT}`);
   server.start({
     transportType: 'httpStream',
-    httpStream: { port: PORT },
+    httpStream: { port: PORT, host: '0.0.0.0' },
   });
 }
