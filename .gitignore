@@ -1,6 +1,17 @@
+# Python artefacts (no longer used — project migrated to TypeScript)
 .venv/
 __pycache__/
 *.pyc
-.env
 *.egg-info/
+
+# Node.js / TypeScript
+node_modules/
 dist/
+
+# Environment files
+.env
+.env.local
+
+# Editor / OS
+.DS_Store
+*.swp
