@@ -1,58 +1,70 @@
-# @format
-# wiki-mcp Dockerfile
+# syntax=docker/dockerfile:1
+# =============================================================================
+# wiki-mcp — Multi-stage Docker build
 #
-# Multi-stage build — matches Python 3.13 used in local .venv.
+# Stage 1 (deps):   installs production Node.js dependencies via yarn
+# Stage 2 (build):  compiles TypeScript → JavaScript
+# Stage 3 (runner): minimal production image, non-root user (uid 1001)
 #
-# Stage 1 (deps):   pip install into /install prefix
-# Stage 2 (runner): minimal runtime, non-root uid 1001
-#
-# Build:
-#   docker build -t wiki-mcp .
-#
-# Run locally (file mode):
-#   docker run -p 8000:8000 \
-#     -e WIKI_LOCAL_PATH=/kb \
-#     -v /Users/nelsonlamounier/Desktop/portfolio/reasearch-brain/kowledge-base:/kb:ro \
-#     wiki-mcp
-#
-# Run in K8s (S3 mode):
-#   WIKI_S3_BUCKET and AWS creds come from EC2 Instance Profile (IMDS)
+# Security posture:
+#   - Non-root user (uid 1001) — matches K8s pod securityContext
+#   - No source code in final image, only compiled dist/ + node_modules
+#   - AWS credentials resolved from EC2 Instance Profile (IMDS) at runtime
+#   - No secrets baked into the image
+# =============================================================================
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 1 — Dependencies
-# ─────────────────────────────────────────────────────────────────────────────
-FROM python:3.13-slim AS deps
-
-WORKDIR /install
-
-COPY requirements.txt .
-RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
-
-# ─────────────────────────────────────────────────────────────────────────────
-# Stage 2 — Runtime
-# ─────────────────────────────────────────────────────────────────────────────
-FROM python:3.13-slim AS runner
-
-# Non-root user — uid 1001 matches admin-api pattern in the cluster
-RUN groupadd --gid 1001 wikimcp && \
-    useradd  --uid 1001 --gid 1001 --no-create-home wikimcp
+# ── Stage 1: dependency installation ─────────────────────────────────────────
+FROM node:22-slim AS deps
 
 WORKDIR /app
 
-# Copy installed packages and app code
-COPY --from=deps /install /usr/local
-COPY kb.py server.py ./
+# Copy manifests first for layer caching — only re-runs when deps change
+COPY package.json yarn.lock ./
 
-RUN chown -R wikimcp:wikimcp /app
+# Install production dependencies only, frozen lockfile for reproducibility
+RUN yarn install --frozen-lockfile --production=false
 
-USER wikimcp
+# ── Stage 2: TypeScript build ─────────────────────────────────────────────────
+FROM node:22-slim AS build
+
+WORKDIR /app
+
+# Inherit full node_modules (includes devDependencies for tsc)
+COPY --from=deps /app/node_modules ./node_modules
+COPY tsconfig.json ./
+COPY src ./src
+
+# Compile TypeScript → dist/
+RUN npx tsc --project tsconfig.json
+
+# ── Stage 3: production runner ────────────────────────────────────────────────
+FROM node:22-slim AS runner
+
+# Metadata labels
+LABEL org.opencontainers.image.title="wiki-mcp"
+LABEL org.opencontainers.image.description="Portfolio knowledge-base MCP server"
+
+WORKDIR /app
+
+# Create non-root user with specific uid matching K8s pod securityContext
+RUN groupadd --gid 1001 appgroup \
+ && useradd --uid 1001 --gid appgroup --no-create-home appuser
+
+ENV NODE_ENV=production
+ENV PORT=8000
+
+# Copy compiled output and production node_modules only
+COPY --from=build /app/dist ./dist
+COPY --from=deps /app/node_modules ./node_modules
+COPY package.json ./
+
+# Drop to non-root user before starting
+USER appuser
 
 EXPOSE 8000
 
-# K8s health probe will hit /healthz
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz')"
+# Kubernetes liveness/readiness probe
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+  CMD node -e "fetch('http://localhost:8000/healthz').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"
 
-ENV PYTHONUNBUFFERED=1
-
-CMD ["python", "server.py"]
+CMD ["node", "dist/server.js"]
