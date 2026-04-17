@@ -35,7 +35,7 @@ WORKDIR /app
 
 # Inherit full node_modules (includes devDependencies for tsc)
 COPY --from=deps /app/node_modules ./node_modules
-COPY tsconfig.json ./
+COPY package.json tsconfig.json ./
 COPY src ./src
 
 # Compile TypeScript → dist/
