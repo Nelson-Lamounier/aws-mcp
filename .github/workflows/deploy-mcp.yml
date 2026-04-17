@@ -5,7 +5,7 @@
 # CI/CD pipeline for the FastMCP knowledge-base server that lives in this repo.
 #
 # What it does:
-#   1. Builds the wiki-mcp Docker image (Python 3.13 multi-stage)
+#   1. Builds the wiki-mcp Docker image (Node.js 22 / TypeScript multi-stage)
 #   2. Pushes to the ECR repository created by the CDK SharedVpcStack
 #   3. Forces an ArgoCD sync so the new image rolls out immediately
 #
@@ -31,7 +31,7 @@
 #     --value "Basic $(echo -n 'mcp:<password>' | base64)" --type SecureString
 #
 # Trigger methods:
-#   1. Push to main or develop when Python source, requirements, or Dockerfile changes
+#   1. Push to main or develop when TypeScript source, package manifests, or Dockerfile changes
 #   2. Manual: workflow_dispatch (deploy any commit on demand)
 #
 # Pipeline:
@@ -46,8 +46,10 @@ on:
       - main
       - develop
     paths:
-      - "*.py"
-      - "requirements.txt"
+      - "src/**/*.ts"
+      - "package.json"
+      - "yarn.lock"
+      - "tsconfig.json"
       - "Dockerfile"
 
   workflow_dispatch:
@@ -60,7 +62,7 @@ env:
   ENVIRONMENT: development
   AWS_REGION: "eu-west-1"
   # Composite tag: SHA from this repo (my-mcp) + run attempt.
-  # Prevents ECR overwrites on pipeline retries; traces back to Python commit.
+  # Prevents ECR overwrites on pipeline retries; traces back to the commit.
   IMAGE_TAG: "${{ github.sha }}-r${{ github.run_attempt }}"
 
 # ===========================================================================
@@ -92,8 +94,8 @@ jobs:
       - name: Build Docker Image (wiki-mcp)
         uses: docker/build-push-action@v6
         with:
-          # Build context is the repo root — Dockerfile copies kb.py and server.py
-          # from the working directory.
+          # Build context is the repo root — Dockerfile compiles TypeScript from ./src
+          # and produces a minimal Node.js production image.
           context: .
           file: Dockerfile
           push: false
@@ -142,6 +144,14 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Trigger update in portfolio-doc
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.DOCS_PAT }}
+          repository: Nelson-Lamounier/portfolio-doc
+          event-type: wiki-updated
+          client-payload: '{"sha": "${{ github.sha }}"}'
 
       - name: Configure AWS Credentials
         uses: ./.github/actions/configure-aws
