@@ -19,10 +19,14 @@ FROM node:22-slim AS deps
 WORKDIR /app
 
 # Copy manifests first for layer caching — only re-runs when deps change
-COPY package.json yarn.lock ./
+COPY package.json yarn.lock .yarnrc.yml ./
+COPY .yarn ./.yarn
+
+# Enable corepack for modern Yarn
+RUN corepack enable
 
 # Install production dependencies only, frozen lockfile for reproducibility
-RUN yarn install --frozen-lockfile --production=false
+RUN yarn install --immutable
 
 # ── Stage 2: TypeScript build ─────────────────────────────────────────────────
 FROM node:22-slim AS build
