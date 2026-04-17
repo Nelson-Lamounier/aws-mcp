@@ -15,7 +15,7 @@
 # =============================================================================
 
 # ── Stage 1: dependency installation ─────────────────────────────────────────
-FROM node:22-alpine AS deps
+FROM node:24-alpine AS deps
 
 WORKDIR /app
 
@@ -30,7 +30,7 @@ RUN corepack enable
 RUN yarn install --immutable
 
 # ── Stage 2: TypeScript build ─────────────────────────────────────────────────
-FROM node:22-alpine AS build
+FROM node:24-alpine AS build
 
 WORKDIR /app
 
