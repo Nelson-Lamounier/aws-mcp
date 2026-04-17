@@ -4,17 +4,18 @@
 #
 # Stage 1 (deps):   installs production Node.js dependencies via yarn
 # Stage 2 (build):  compiles TypeScript → JavaScript
-# Stage 3 (runner): minimal production image, non-root user (uid 1001)
+# Stage 3 (runner): distroless production image, non-root uid 65532
 #
 # Security posture:
-#   - Non-root user (uid 1001) — matches K8s pod securityContext
+#   - Distroless runner (no shell, no package manager, no OS utilities)
+#   - Non-root user uid 65532 (distroless nonroot built-in)
 #   - No source code in final image, only compiled dist/ + node_modules
 #   - AWS credentials resolved from EC2 Instance Profile (IMDS) at runtime
 #   - No secrets baked into the image
 # =============================================================================
 
 # ── Stage 1: dependency installation ─────────────────────────────────────────
-FROM node:22-slim AS deps
+FROM node:22-alpine AS deps
 
 WORKDIR /app
 
@@ -29,7 +30,7 @@ RUN corepack enable
 RUN yarn install --immutable
 
 # ── Stage 2: TypeScript build ─────────────────────────────────────────────────
-FROM node:22-slim AS build
+FROM node:22-alpine AS build
 
 WORKDIR /app
 
@@ -42,17 +43,15 @@ COPY src ./src
 RUN npx tsc --project tsconfig.json
 
 # ── Stage 3: production runner ────────────────────────────────────────────────
-FROM node:22-slim AS runner
+# Distroless: no shell, no package manager, no OS utilities — minimal attack surface.
+# Runs as uid 65532 (nonroot) by default — no RUN useradd needed.
+FROM gcr.io/distroless/nodejs22-debian12:nonroot AS runner
 
 # Metadata labels
 LABEL org.opencontainers.image.title="wiki-mcp"
 LABEL org.opencontainers.image.description="Portfolio knowledge-base MCP server"
 
 WORKDIR /app
-
-# Create non-root user with specific uid matching K8s pod securityContext
-RUN groupadd --gid 1001 appgroup \
- && useradd --uid 1001 --gid appgroup --no-create-home appuser
 
 ENV NODE_ENV=production
 ENV PORT=8000
@@ -62,13 +61,10 @@ COPY --from=build /app/dist ./dist
 COPY --from=deps /app/node_modules ./node_modules
 COPY package.json ./
 
-# Drop to non-root user before starting
-USER appuser
-
 EXPOSE 8000
 
-# Kubernetes liveness/readiness probe
+# Kubernetes liveness/readiness probe — uses /nodejs/bin/node path in distroless
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
-  CMD node -e "fetch('http://localhost:8000/healthz').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"
+  CMD ["/nodejs/bin/node", "-e", "fetch('http://localhost:8000/healthz').then(r=>r.ok?process.exit(0):process.exit(1)).catch(()=>process.exit(1))"]
 
-CMD ["node", "dist/server.js"]
+CMD ["dist/server.js"]
