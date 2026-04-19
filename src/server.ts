@@ -159,19 +159,30 @@ server.addTool({
 
 /**
  * get_resume_constraints — convenience shortcut for the Strategist agent.
- * Returns the three hard-rule pages for resume generation.
+ * Returns all hard-rule and archetype-selection pages for resume generation.
+ *
+ * Pages included:
+ *   agent-guide     — confidence thresholds, ordering rules, ATS rules, banned verbs
+ *   gap-awareness   — what NOT to claim; absent/partial concepts with safe framing
+ *   voice-library   — authentic phrase anchors, banned AI terms, sentence variation
+ *   role-archetypes — per-role emphasis maps and archetype selector (deterministic delivery
+ *                     avoids Pinecone ranking miss for low-signal JDs like ops/data-center roles)
+ *   achievements    — canonical bullet templates and project templates per role type
  */
 server.addTool({
   name: 'get_resume_constraints',
   description:
-    'Returns the hard rules, gap boundaries and voice library for resume generation. ' +
-    'Used by the Strategist agent to enforce non-negotiable constraints.',
+    'Returns the hard rules, gap boundaries, voice library, role archetypes, and achievement ' +
+    'bullet templates for resume generation. Used by the Strategist agent to enforce ' +
+    'non-negotiable constraints and select the correct role archetype.',
   parameters: z.object({}),
   execute: async () => {
     return await kb.getPagesCombined([
       'resume/agent-guide',
       'resume/gap-awareness',
       'resume/voice-library',
+      'resume/role-archetypes',
+      'resume/achievements',
     ]);
   },
 });
@@ -202,13 +213,19 @@ app.get('/healthz', async (c) => {
 
 /**
  * GET /api/constraints — fetches resume constraint pages for Lambda callers.
- * Returns the three core constraint pages combined.
+ * Returns all hard-rule and archetype-selection pages combined.
+ *
+ * role-archetypes and achievements are included here (not left to Pinecone)
+ * because archetype selection must be deterministic — semantic ranking can miss
+ * these pages for low-signal JDs (e.g. ops/data-center roles with no tech keywords).
  */
 app.get('/api/constraints', async (c) => {
   const content = await kb.getPagesCombined([
     'resume/agent-guide',
     'resume/gap-awareness',
     'resume/voice-library',
+    'resume/role-archetypes',
+    'resume/achievements',
   ]);
   return c.json({ content });
 });
